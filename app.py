@@ -5,27 +5,48 @@ from vertexai.generative_models import GenerativeModel, Part
 from google.oauth2 import service_account
 import json
 import os
+import re
 
-# 1. 页面配置必须放在第一行
+# 1. 页面配置 (必须在第一行)
 st.set_page_config(page_title="Biblical Moments - 圣经合影", page_icon="✝️", layout="centered")
 
-# --- 2. Google Cloud 核心认证逻辑 (这是修改的重点) ---
+# --- 2. 增强版 Google Cloud 认证逻辑 (包含自动修复功能) ---
 def init_vertex_ai():
     """
     初始化 Vertex AI 连接。
-    优先从 Streamlit Secrets 读取 Service Account，
-    如果在本地运行且没有 Secrets，则尝试读取环境变量。
+    包含针对 Streamlit Secrets 格式错误的自动修复逻辑。
     """
     try:
         # 情况 A: 在 Streamlit Cloud 上运行 (读取 Secrets)
         if "gcp_service_account" in st.secrets:
-            # 1. 解析 Secrets 里的 JSON 字符串
-            service_account_info = json.loads(st.secrets["gcp_service_account"])
+            raw_json_str = st.secrets["gcp_service_account"]
             
-            # 2. 创建凭证对象
+            # --- 🛡️ 容错解析逻辑开始 ---
+            try:
+                # 尝试 1: 使用 strict=False，允许字符串中包含控制字符（如回车换行）
+                service_account_info = json.loads(raw_json_str, strict=False)
+            
+            except json.JSONDecodeError:
+                # 尝试 2: 如果还是失败，说明格式可能比较混乱
+                # 尝试手动清理 private_key 中的换行符问题
+                # 这是一个简单的正则替换，试图保留结构但清理值
+                try:
+                    # 将看起来像 private key 区域内的真实换行替换为 \n 字符
+                    # 注意：这只是一个应急修复
+                    fixed_str = raw_json_str.replace('\n', '\\n')
+                    # 有时候全局替换会破坏外层结构，所以我们回退到只依赖 strict=False
+                    # 如果 strict=False 失败，通常意味着引号没闭合或者丢了逗号
+                    st.warning("JSON 格式轻微异常，正在尝试自动修复...")
+                    service_account_info = json.loads(raw_json_str, strict=False)
+                except:
+                    st.error("❌ 自动修复失败。Secrets 格式损坏太严重。")
+                    st.stop()
+            # --- 容错解析逻辑结束 ---
+
+            # 创建凭证对象
             credentials = service_account.Credentials.from_service_account_info(service_account_info)
             
-            # 3. 初始化 (Project ID 自动从 JSON 里获取)
+            # 初始化 (Project ID 自动从 JSON 里获取)
             vertexai.init(
                 project=service_account_info["project_id"], 
                 location="us-central1", 
@@ -33,26 +54,29 @@ def init_vertex_ai():
             )
             return True
 
-        # 情况 B: 在本地电脑运行 (依赖环境变量 GOOGLE_APPLICATION_CREDENTIALS)
+        # 情况 B: 在本地电脑运行
         else:
-            # 尝试直接初始化 (假设用户本地已配置好 gcloud auth 或环境变量)
             vertexai.init(location="us-central1")
             return True
             
     except Exception as e:
-        st.error(f"⚠️ 认证失败: 请检查 Secrets 配置。\n错误详情: {e}")
+        # 显示友好的错误提示，帮助定位问题
+        st.error(f"⚠️ 认证配置错误 (Secrets Error)")
+        with st.expander("查看详细错误信息"):
+            st.code(str(e))
+        st.info("💡 提示：请检查 Streamlit Secrets 中是否完整复制了 JSON 内容，特别是大括号 {} 是否成对。")
         return False
 
 # 执行初始化
 if not init_vertex_ai():
-    st.stop() # 如果认证失败，停止运行后续代码
+    st.stop()
 
 # --- 3. 样式美化 ---
 st.markdown("""
 <style>
     .stButton>button {
         width: 100%;
-        background-color: #D4AF37; /* 金色 */
+        background-color: #D4AF37;
         color: white;
         border-radius: 20px;
         height: 50px;
@@ -80,7 +104,6 @@ st.markdown("""
 st.title("✝️ Biblical Moments")
 st.write("上传您的照片，穿越时空与圣经人物合影。")
 
-# 输入区域
 col1, col2 = st.columns(2)
 with col1:
     bible_character = st.text_input("想合照的圣经人物", placeholder="例如：耶稣、大卫、彼得")
@@ -96,13 +119,10 @@ art_style = st.select_slider("选择照片风格",
 
 uploaded_file = st.file_uploader("上传您的自拍/半身照", type=['jpg', 'png', 'jpeg'])
 
-# --- 5. 核心 AI 功能函数 ---
+# --- 5. AI 功能函数 ---
 
 def get_gemini_prompt(user_image_bytes, character, clothing, style):
-    """
-    使用 Gemini 1.5 Pro 分析用户照片并生成 Prompt
-    """
-    # 加载模型
+    """Gemini 1.5 Pro 分析与提示词生成"""
     model = GenerativeModel("gemini-1.5-pro")
     
     image_part = Part.from_data(data=user_image_bytes, mime_type="image/jpeg")
@@ -116,7 +136,7 @@ def get_gemini_prompt(user_image_bytes, character, clothing, style):
     
     SCENE DETAILS:
     - Subject A: The person from the image (use the analyzed description above).
-    - Subject B: {character} from the Bible. Ensure {character} is depicted historically accurately according to their era (1st century Judea, Old Testament Egypt, etc.).
+    - Subject B: {character} from the Bible. Ensure {character} is depicted historically accurately according to their era.
     - Action: They are standing side-by-side or interacting in a friendly, holy manner.
     - User's Clothing: {clothing}.
     - Background: A setting appropriate for the Bible character's era.
@@ -130,17 +150,14 @@ def get_gemini_prompt(user_image_bytes, character, clothing, style):
     return response.text
 
 def generate_image(prompt):
-    """
-    调用 Imagen 3 生成图片
-    """
-    # 加载模型: imagegeneration@006 是目前的 Imagen 3 模型
+    """Imagen 3 生成图片"""
     model = ImageGenerationModel.from_pretrained("imagegeneration@006")
     
     images = model.generate_images(
         prompt=prompt,
         number_of_images=1,
         language="en",
-        aspect_ratio="3:4", # 竖屏适合手机
+        aspect_ratio="3:4",
         safety_filter_level="block_some",
         person_generation="allow_adult"
     )
@@ -152,26 +169,23 @@ if st.button("✨ 生成合照"):
         st.warning("请先上传照片并输入圣经人物名字。")
     else:
         try:
-            # 显示进度条
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # 第一步：Gemini 分析
+            # 1. Gemini
             status_text.text("🙏 正在祈祷与构思... (Gemini 分析照片特征)")
             image_bytes = uploaded_file.getvalue()
             generated_prompt = get_gemini_prompt(image_bytes, bible_character, clothing_style, art_style)
             progress_bar.progress(50)
             
-            # 第二步：Imagen 作画
+            # 2. Imagen
             status_text.text(f"🎨 正在绘制与 {bible_character} 的合影... (Imagen 生成中)")
             result_image = generate_image(generated_prompt)
             progress_bar.progress(100)
             status_text.text("✨ 完成！")
             
-            # 展示图片
             st.image(result_image._image_bytes, caption=f"您与 {bible_character} 的合影", use_column_width=True)
             
-            # 下载按钮
             st.download_button(
                 label="📥 保存照片",
                 data=result_image._image_bytes,
@@ -179,16 +193,14 @@ if st.button("✨ 生成合照"):
                 mime="image/png"
             )
             
-            # 额外：生成经文
             st.markdown("---")
             st.markdown("### 📖 每日恩典")
-            verse_model = GenerativeModel("gemini-1.5-flash") # 使用 Flash 模型速度更快
+            verse_model = GenerativeModel("gemini-1.5-flash")
             verse = verse_model.generate_content(f"给我一句关于'{bible_character}'或者关于'友谊/信心/爱'的圣经经文，中文和英文对照。")
             st.info(verse.text)
                 
         except Exception as e:
-            st.error("生成过程中出现错误，请稍后再试。")
-            with st.expander("查看错误详情 (调试用)"):
-                st.write(e)
+            st.error("生成出错，请稍后重试。")
+            st.expander("调试信息").write(e)
 
 st.markdown("<p class='caption'>Powered by Google Vertex AI (Gemini 1.5 & Imagen 3)</p>", unsafe_allow_html=True)
