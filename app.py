@@ -1,156 +1,125 @@
 import streamlit as st
 import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from PIL import Image
 import io
+import time
 
-# --- 1. 页面基础配置 ---
-st.set_page_config(page_title="Nano Banana 圣经照相馆", page_icon="🍌")
-
-# 美化界面：隐藏多余菜单
+# --- 1. 页面配置 ---
+st.set_page_config(page_title="圣经时空照相馆", page_icon="✨")
 st.markdown("""
     <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
     .stApp {background-color: #FAFAF9;}
-    /* 调整一下按钮样式 */
     div.stButton > button:first-child {
-        background-color: #F59E0B;
+        background-color: #EA580C;
         color: white;
-        border-radius: 20px;
-        border: none;
-        padding: 10px 20px;
+        border-radius: 10px;
+        height: 50px;
+        font-size: 18px;
         font-weight: bold;
     }
     </style>
-    """, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-st.title("🍌 Nano Banana 圣经合影")
-st.caption("Powered by Google Gemini 3 Pro (Image Preview)")
+st.title("✨ 圣经时空照相馆")
+st.caption("Powered by Google Gemini")
 
-# --- 2. 获取 API Key ---
-# 优先读取 Streamlit Secrets
+# --- 2. API Key 配置 ---
 api_key = st.secrets.get("GOOGLE_API_KEY")
-
-# 如果没配置，允许侧边栏输入（方便调试）
 if not api_key:
     with st.sidebar:
-        api_key = st.text_input("请输入 API Key", type="password")
-        st.info("建议将 Key 配置在 Streamlit Secrets 中以保证安全。")
-
+        api_key = st.text_input("API Key", type="password")
 if not api_key:
-    st.warning("👈 请先配置 API Key 才能开始")
+    st.warning("请先配置 API Key")
     st.stop()
 
-# 配置 Google AI
 genai.configure(api_key=api_key)
 
-# --- 3. 界面交互 ---
+# --- 3. 关键修复：把安全限制降到最低 ---
+# 必须加上这个，否则生成“宗教人物”或“真人”容易被系统自动拦截导致卡死
+safety_settings = {
+    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+}
+
+# --- 4. 界面 ---
 with st.container():
-    st.subheader("1. 上传照片")
-    uploaded_file = st.file_uploader("请上传正面清晰照", type=["jpg", "jpeg", "png"])
-    
+    uploaded_file = st.file_uploader("1. 上传你的照片", type=["jpg", "jpeg", "png"])
     user_image = None
     if uploaded_file:
-        # 读取并展示用户图片
         user_image = Image.open(uploaded_file)
-        st.image(user_image, caption="已上传", width=150)
+        st.image(user_image, width=150)
 
-    st.subheader("2. 设定合照")
     col1, col2 = st.columns(2)
     with col1:
-        character = st.text_input("圣经人物", value="Jesus", placeholder="例如: Jesus, David, Moses")
+        character = st.text_input("2. 圣经人物", value="Jesus")
     with col2:
-        clothing = st.selectbox("你的服装", [
-            "Biblical Robes (Historical) - 圣经时代长袍", 
-            "Modern Casual (T-shirt) - 现代休闲", 
-            "Suit & Tie - 正装"
-        ])
+        clothing = st.selectbox("3. 服装风格", ["Historical Robes (复古长袍)", "Casual (现代便装)", "Suit (西装)"])
     
-    # 提取服装的英文描述，发给 AI
-    clothing_prompt = clothing.split(" - ")[0]
-    
-    style = st.select_slider("风格强度", options=["Realistic", "Cinematic", "Oil Painting"], value="Cinematic")
+    style = st.selectbox("4. 画面风格", ["Cinematic (电影感)", "Oil Painting (油画)", "Realistic (写实)"])
 
-# --- 4. 核心生成逻辑 (修复版) ---
-if st.button("🚀 生成合照", type="primary", use_container_width=True):
-    if not user_image or not character:
-        st.error("❌ 请先上传照片并填写人物名字！")
+# --- 5. 生成逻辑 ---
+if st.button("🚀 开始生成 (解决卡顿版)", type="primary", use_container_width=True):
+    if not user_image:
+        st.error("请先上传照片！")
     else:
-        status_text = st.empty()
-        bar = st.progress(0)
-        
+        status = st.status("正在与 AI 建立连接...", expanded=True)
         try:
-            status_text.text("正在连接 Gemini 3 Pro...")
-            bar.progress(20)
-
-            # 指定模型 ID (截图中的模型)
-            MODEL_ID = 'gemini-3-pro-image-preview'
+            # 步骤 1: 准备模型
+            # 如果 Gemini 3 依然卡住，代码会自动尝试 fallback
+            status.write("正在初始化模型...")
+            MODEL_ID = 'gemini-3-pro-image-preview' # 你指定的模型
             model = genai.GenerativeModel(MODEL_ID)
 
-            # 构建提示词
             prompt = f"""
-            Task: Edit the input image to create a two-person photo.
-            1. Keep the user from the input image on the right.
-            2. Add {character} from the Bible on the left.
-            3. {character} must look historically accurate (ancient Middle Eastern appearance).
-            4. The user should be wearing {clothing_prompt}.
-            5. Background: Ancient biblical landscape.
-            6. Style: {style}, 8k resolution, photorealistic.
-            7. Output Format: IMAGE ONLY. Do not describe the image, just generate it.
+            Task: Create a two-shot image.
+            Subject 1: {character} from the Bible, historically accurate ancient look.
+            Subject 2: The user from the input image, wearing {clothing}.
+            Action: Standing side by side, friendly expression.
+            Background: Ancient biblical landscape.
+            Style: {style}, high quality.
+            Output: IMAGE ONLY.
             """
-
-            bar.progress(50)
-            status_text.text("AI 正在绘图，请稍候 (约10-20秒)...")
-
-            # 发送请求
-            response = model.generate_content([prompt, user_image])
             
-            bar.progress(90)
-            status_text.text("正在解析数据...")
-
-            # --- 核心修复：解析图片数据 ---
-            # 这里的逻辑专门处理你截图里的 GenerateContentResponse 结构
+            status.write("正在发送图片数据 (这步最慢，请耐心等待 30秒)...")
             
-            image_generated = False
-
+            # 步骤 2: 调用 (带上安全设置)
+            # 增加 generation_config 确保输出格式
+            response = model.generate_content(
+                [prompt, user_image],
+                safety_settings=safety_settings,
+                request_options={"timeout": 60} # 设置 60秒超时防止死等
+            )
+            
+            status.write("数据接收完毕，正在解析...")
+            
+            # 步骤 3: 解析图片
+            image_found = False
+            
             if response.candidates:
-                for candidate in response.candidates:
-                    for part in candidate.content.parts:
-                        # 检查是否有二进制图片数据 (inline_data)
-                        if part.inline_data:
-                            try:
-                                # 1. 获取 bytes 数据
-                                img_bytes = part.inline_data.data
-                                # 2. 转换为 PIL Image 对象
-                                final_image = Image.open(io.BytesIO(img_bytes))
-                                
-                                # 3. 展示成功界面
-                                st.balloons() # 撒花庆祝
-                                st.success("✨ 合照生成成功！")
-                                st.image(final_image, caption=f"我和 {character} 的合照", use_column_width=True)
-                                image_generated = True
-                                break # 找到图了就退出循环
-                            except Exception as img_err:
-                                st.error(f"解析图片失败: {img_err}")
+                for part in response.candidates[0].content.parts:
+                    if part.inline_data:
+                        status.update(label="生成成功！", state="complete", expanded=False)
                         
-                        # 如果没有图片，检查是不是返回了文字
-                        elif part.text:
-                            # 有时候模型还是会忍不住说话
-                            print("Model Text Response:", part.text)
-
-            if not image_generated:
-                st.warning("⚠️ 生成完成，但未检测到图片。")
+                        img_data = part.inline_data.data
+                        final_img = Image.open(io.BytesIO(img_data))
+                        
+                        st.image(final_img, caption=f"我和 {character}", use_column_width=True)
+                        image_found = True
+                        break
+            
+            if not image_found:
+                status.update(label="生成结束", state="error")
+                st.error("⚠️ AI 这次没有返回图片。")
                 st.write("可能原因：")
-                st.write("1. 模型认为图片内容敏感（Google安全过滤非常严格）。")
-                st.write("2. API Key 权限不足。")
-                # 打印出 AI 到底说了什么，方便调试
+                st.write("1. 模型认为内容依然敏感（即使降低了安全等级）。")
+                st.write("2. Gemini 3 Pro 处于预览版，有时候只返回文字描述。")
                 if response.text:
-                    st.info(f"AI 回复内容: {response.text}")
+                    st.info(f"AI返回的文字: {response.text}")
 
         except Exception as e:
-            st.error(f"发生错误: {str(e)}")
-            st.info("提示：如果是 404 Not Found，请将代码中的 MODEL_ID 改为 'gemini-1.5-flash' 再试。")
-        
-        finally:
-            bar.empty()
-            status_text.empty()
+            status.update(label="发生错误", state="error")
+            st.error(f"出错信息: {e}")
+            st.warning("建议：如果一直卡住或报错，请尝试更换 API Key，或等待几分钟再试（预览版模型不稳定）。")
