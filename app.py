@@ -10,15 +10,17 @@ import re
 # 1. 页面配置
 st.set_page_config(page_title="Biblical Moments - 圣经合影", page_icon="✝️", layout="centered")
 
-# --- 2. 认证逻辑 ---
+# --- 2. 认证逻辑 (保持稳健的容错逻辑) ---
 def init_vertex_ai():
     try:
         if "gcp_service_account" in st.secrets:
             raw_json_str = st.secrets["gcp_service_account"]
             try:
+                # 尝试标准解析
                 service_account_info = json.loads(raw_json_str, strict=False)
             except json.JSONDecodeError:
                 try:
+                    # 尝试修复换行符
                     fixed_str = raw_json_str.replace('\n', '\\n')
                     service_account_info = json.loads(raw_json_str, strict=False)
                 except:
@@ -26,9 +28,11 @@ def init_vertex_ai():
                     st.stop()
 
             credentials = service_account.Credentials.from_service_account_info(service_account_info)
+            # 初始化 Vertex AI (强制 us-central1)
             vertexai.init(project=service_account_info["project_id"], location="us-central1", credentials=credentials)
             return True
         else:
+            # 本地运行
             vertexai.init(location="us-central1")
             return True
     except Exception as e:
@@ -60,35 +64,55 @@ art_style = st.select_slider("选择照片风格", options=["超写实摄影 (Ph
 
 uploaded_file = st.file_uploader("上传您的自拍/半身照", type=['jpg', 'png', 'jpeg'])
 
-# --- 4. AI 功能 (修改了这里的模型名称) ---
+# --- 4. AI 功能 ---
 
 def get_gemini_prompt(user_image_bytes, character, clothing, style):
-    # 🔴 修复点：使用具体的版本号 gemini-1.5-pro-001
-    model = GenerativeModel("gemini-1.5-pro-001")
+    """
+    使用 Gemini 1.5 Flash 分析图片并生成提示词。
+    (Flash 模型速度快，适合做多模态分析)
+    """
+    try:
+        model = GenerativeModel("gemini-1.5-flash")
+    except:
+        model = GenerativeModel("gemini-1.5-pro")
     
     image_part = Part.from_data(data=user_image_bytes, mime_type="image/jpeg")
     
     prompt_instruction = f"""
     You are an expert biblical historian and an art director.
-    TASK: Analyze the person in the image (face, ethnicity, age, hair) and create an Imagen 3 prompt.
+    TASK: Analyze the person in the image (face, ethnicity, age, hair) and create a detailed image generation prompt.
     SCENE: The user and {character} from the Bible. {character} must be historically accurate.
     ACTION: Standing side-by-side, friendly.
     CLOTHING: User wears {clothing}.
-    STYLE: {style}, 8k resolution.
+    STYLE: {style}, 8k resolution, high detail.
     OUTPUT: Just the prompt text.
     """
     response = model.generate_content([image_part, prompt_instruction])
     return response.text
 
 def generate_image(prompt):
-    # Imagen 3 模型
-    model = ImageGenerationModel.from_pretrained("imagegeneration@006")
+    """
+    使用指定的生图模型生成图片
+    """
+    # 🔴 核心修改：使用您指定的 imagen-4.0-generate-001
+    model_name = "imagen-4.0-generate-001"
     
-    images = model.generate_images(
-        prompt=prompt, number_of_images=1, language="en", aspect_ratio="3:4",
-        safety_filter_level="block_some", person_generation="allow_adult"
-    )
-    return images[0]
+    try:
+        model = ImageGenerationModel.from_pretrained(model_name)
+        
+        images = model.generate_images(
+            prompt=prompt,
+            number_of_images=1,
+            language="en",
+            aspect_ratio="3:4",
+            safety_filter_level="block_some",
+            person_generation="allow_adult"
+        )
+        return images[0]
+        
+    except Exception as e:
+        # 如果指定的 4.0 模型失败，抛出明确错误，方便排查
+        raise RuntimeError(f"模型 {model_name} 调用失败。请检查该模型是否已在您的 Project 中开通白名单。错误详情: {e}")
 
 # --- 5. 执行逻辑 ---
 if st.button("✨ 生成合照"):
@@ -99,26 +123,36 @@ if st.button("✨ 生成合照"):
             progress = st.progress(0)
             status = st.empty()
             
+            # 1. Gemini 分析
             status.text("🙏 Gemini 正在观察照片...")
             img_bytes = uploaded_file.getvalue()
-            # 1. Gemini
             prompt = get_gemini_prompt(img_bytes, bible_character, clothing_style, art_style)
             progress.progress(50)
             
-            # 2. Imagen
-            status.text(f"🎨 正在与 {bible_character} 合影...")
+            # 2. Imagen 生成
+            status.text(f"🎨 正在使用 {bible_character} 合影 (模型: Imagen 4)...")
             result = generate_image(prompt)
             progress.progress(100)
             status.text("✨ 完成！")
             
-            st.image(result._image_bytes, caption=f"与 {bible_character} 的合影", use_column_width=True)
+            # 展示
+            st.image(result._image_bytes, caption=f"您与 {bible_character} 的合影", use_column_width=True)
             
-            # 经文生成
+            # 下载
+            st.download_button(
+                label="📥 保存照片", 
+                data=result._image_bytes, 
+                file_name=f"with_{bible_character}.png", 
+                mime="image/png"
+            )
+            
+            # 经文
             st.markdown("---")
-            v_model = GenerativeModel("gemini-1.5-flash-001") # 这里也改用了具体版本
+            v_model = GenerativeModel("gemini-1.5-flash")
             verse = v_model.generate_content(f"给我一句关于'{bible_character}'的圣经经文(中英对照)。")
             st.info(verse.text)
             
         except Exception as e:
             st.error("生成出错")
-            st.expander("错误详情").write(e)
+            with st.expander("查看错误详情"):
+                st.code(str(e))
