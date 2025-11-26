@@ -1,30 +1,33 @@
 import streamlit as st
 import vertexai
-from vertexai.preview.vision_models import ImageGenerationModel, Image as VertexImage
+from vertexai.preview.vision_models import ImageGenerationModel
 from vertexai.generative_models import GenerativeModel, Part
 from google.oauth2 import service_account
 import json
-import io
+import os
 
 # 1. 页面配置
-st.set_page_config(page_title="Biblical Moments - 圣经合影", page_icon="✝️", layout="centered")
+st.set_page_config(page_title="Biblical Moments - AI Gen", page_icon="✝️", layout="centered")
 
-# --- 2. 认证逻辑 (保持不变) ---
+# --- 2. 认证逻辑 (保持稳健的容错机制) ---
 def init_vertex_ai():
     try:
         if "gcp_service_account" in st.secrets:
             raw_json_str = st.secrets["gcp_service_account"]
             try:
+                # 尝试标准解析
                 service_account_info = json.loads(raw_json_str, strict=False)
             except json.JSONDecodeError:
                 try:
+                    # 尝试自动修复换行符问题
                     fixed_str = raw_json_str.replace('\n', '\\n')
                     service_account_info = json.loads(raw_json_str, strict=False)
                 except:
-                    st.error("❌ Secrets 格式严重错误。")
+                    st.error("❌ Secrets 格式严重错误，无法解析。")
                     st.stop()
-            
+
             credentials = service_account.Credentials.from_service_account_info(service_account_info)
+            # 强制指定 us-central1 (新模型通常在此区域首发)
             vertexai.init(project=service_account_info["project_id"], location="us-central1", credentials=credentials)
             return True
         else:
@@ -40,99 +43,101 @@ if not init_vertex_ai():
 # --- 3. 样式美化 ---
 st.markdown("""
 <style>
-    .stButton>button { width: 100%; background-color: #D4AF37; color: white; border-radius: 20px; height: 50px; font-size: 18px; border: none; }
+    .stButton>button { width: 100%; background-color: #2E86C1; color: white; border-radius: 20px; height: 50px; font-size: 18px; border: none; }
     h1 { text-align: center; font-family: 'serif'; color: #2C3E50; }
     .caption { text-align: center; color: #888; font-size: 12px; margin-top: 20px; }
-    .stAlert { border-radius: 10px; }
+    .stSuccess { border-radius: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("✝️ Biblical Moments")
-st.write("上传您的照片，AI 将保留您的样貌，生成与圣经人物的合影。")
+st.title("✝️ Biblical Moments (Pro)")
+st.caption(f"Engine: Gemini 2.5 Flash + Imagen 4.0")
 
 col1, col2 = st.columns(2)
 with col1:
-    bible_character = st.text_input("想合照的圣经人物", placeholder="例如：耶稣、摩西、彼得")
+    bible_character = st.text_input("想合照的圣经人物", placeholder="例如：耶稣、大卫、摩西")
 with col2:
-    clothing_style = st.selectbox("您的服装风格", ["保持我照片里的衣服", "圣经时代的古装长袍", "现代休闲装", "正式礼服"])
+    clothing_style = st.selectbox("您的服装风格", ["保持我照片里的衣服", "圣经时代的古装长袍", "现代休闲装", "正式西装/礼服"])
 
-uploaded_file = st.file_uploader("上传您的自拍/半身照 (尽量正面，光线清晰)", type=['jpg', 'png', 'jpeg'])
+uploaded_file = st.file_uploader("上传您的自拍 (将用于特征分析)", type=['jpg', 'png', 'jpeg'])
 
-# --- 4. 核心 AI 逻辑 (升级版) ---
+# --- 4. 核心 AI 逻辑 (使用您指定的特定模型 ID) ---
 
-def get_gemini_analysis(user_image_bytes):
+def get_gemini_prompt_v2(user_image_bytes, character, clothing):
     """
-    使用 Gemini 2.5/1.5 Flash 提取面部特征。
-    这一步是为了给 Imagen 提供文字辅助，确保“像”上加“像”。
+    第一步：使用 Gemini 2.5 Flash Preview 进行超精细视觉分析
     """
+    # 🔴 指定模型 ID：gemini-2.5-flash-preview-09-2025
+    model_id = "gemini-2.5-flash-preview-09-2025"
+    
     try:
-        model = GenerativeModel("gemini-2.5-flash") # 尝试最新模型
+        model = GenerativeModel(model_id)
     except:
-        model = GenerativeModel("gemini-1.5-flash")
+        # 如果预览版 ID 不可用，回退到 1.5 Pro
+        print(f"Model {model_id} not found, falling back.")
+        model = GenerativeModel("gemini-1.5-pro")
 
     image_part = Part.from_data(data=user_image_bytes, mime_type="image/jpeg")
     
-    # 指令：只提取面部特征，越详细越好
-    prompt = """
-    Analyze the person in this image. Describe ONLY their physical appearance in extreme detail for an image generator prompt:
-    - Gender, Age, Ethnicity, Skin tone.
-    - Exact Hair style, hair color, beard/facial hair.
-    - Specific facial features (eye shape, nose shape, smile).
-    - Glasses or accessories if any.
-    Output just the description text.
+    # 编写超级 Prompt：要求 Gemini 充当“摄影师导演”，把用户的脸描述得像代码一样精准
+    prompt_instruction = f"""
+    ROLE: You are an expert AI Image Prompt Engineer.
+    
+    INPUT: An image of a USER and a target BIBLE CHARACTER: {character}.
+    USER CLOTHING GOAL: {clothing}.
+    
+    TASK: Write a highly detailed, photorealistic prompt for Imagen 4.0 to generate a photo of the USER standing with {character}.
+    
+    CRITICAL IDENTITY INSTRUCTIONS:
+    1. Analyze the USER in the image: Describe their face, ethnicity, age, specific eye shape, nose shape, hair style, and hair color in EXTREME DETAIL.
+    2. Do NOT use the user's name, just describe their visual appearance physically so the image generator can reconstruct them.
+    
+    SCENE INSTRUCTIONS:
+    1. Subject B: {character} (Historical accuracy is mandatory).
+    2. Background: Realistic biblical era setting (e.g., Jerusalem stone streets, Desert, Sea of Galilee).
+    3. Lighting: Cinematic, Golden Hour, Soft lighting.
+    4. Style: Award-winning photography, 8k, hyper-realistic.
+    
+    OUTPUT: Return ONLY the raw prompt text. No markdown, no explanations.
     """
     
     try:
-        response = model.generate_content([image_part, prompt])
+        response = model.generate_content([image_part, prompt_instruction])
         return response.text
-    except:
-        return "A person" # 降级处理
+    except Exception as e:
+        st.error(f"Gemini 分析失败: {str(e)}")
+        # 降级备选
+        return f"A photo of a person standing with {character} in biblical times."
 
-def generate_with_identity_preservation(user_image_bytes, character, clothing, user_description):
+def generate_image_v4(prompt):
     """
-    核心升级：使用 edit_images 接口，将原图作为 base_image 喂给模型。
-    这样模型是基于原图进行“修改/重绘”，而不是凭空创造，从而最大程度保留五官。
+    第二步：使用 Imagen 4.0 Generate 001 进行生成
     """
-    # 注意：目前 Imagen 的 edit_images 功能在 imagegeneration@006 (Imagen 2) 上最稳定可用
-    # Imagen 3 的编辑功能 API 尚未完全对所有项目开放，因此这里使用 006 以确保代码不报错
-    model_name = "imagegeneration@006"
+    # 🔴 指定模型 ID：imagen-4.0-generate-001
+    model_name = "imagen-4.0-generate-001"
     
     try:
         model = ImageGenerationModel.from_pretrained(model_name)
         
-        # 1. 将上传的字节流转换为 Vertex AI Image 对象
-        source_image = VertexImage(image_bytes=user_image_bytes)
-        
-        # 2. 构建“编辑”提示词
-        # 我们告诉模型：保持这个人不变，但是把背景换成圣经场景，并在旁边加上圣经人物
-        full_prompt = f"""
-        A photorealistic shot of {user_description} standing side-by-side with {character} from the Bible.
-        The user is wearing {clothing}.
-        {character} is wearing historically accurate clothing from the biblical era.
-        Background is a realistic scene from ancient Israel/Judea.
-        Cinematic lighting, 8k resolution.
-        IMPORTANT: Keep the facial features of the person from the original image exactly as they are.
-        """
-        
-        # 3. 调用 edit_images (图生图)
-        # 不传 mask 参数时，模型会尝试基于全图进行调整 (Image-to-Image / Variation)
-        images = model.edit_images(
-            prompt=full_prompt,
-            base_image=source_image,
+        images = model.generate_images(
+            prompt=prompt,
             number_of_images=1,
             language="en",
-            # guidance_scale 控制对 Prompt 的遵循程度，21-60 之间通常比较好
-            guidance_scale=60, 
+            aspect_ratio="3:4", # 竖屏适合手机
             safety_filter_level="block_some",
             person_generation="allow_adult"
         )
         return images[0]
         
     except Exception as e:
-        raise RuntimeError(f"图生图模型调用失败: {e}")
+        # 如果 4.0 未授权，回退到 3.0 或标准版
+        st.warning(f"⚠️ Imagen 4.0 调用受限 ({str(e)})，正在尝试切换至 Imagen 3...")
+        fallback_model = ImageGenerationModel.from_pretrained("imagegeneration@006")
+        images = fallback_model.generate_images(prompt=prompt, number_of_images=1, aspect_ratio="3:4")
+        return images[0]
 
 # --- 5. 执行逻辑 ---
-if st.button("✨ 生成合照 (保真模式)"):
+if st.button("✨ 启动生成引擎"):
     if not uploaded_file or not bible_character:
         st.warning("请先上传照片并输入人物。")
     else:
@@ -140,41 +145,42 @@ if st.button("✨ 生成合照 (保真模式)"):
             progress = st.progress(0)
             status = st.empty()
             
-            # 读取图片
+            # 1. 视觉分析
+            status.text(f"🧠 Gemini 2.5 Flash 正在解析您的面部特征...")
             img_bytes = uploaded_file.getvalue()
             
-            # 第一步：Gemini 分析面部 (30%)
-            status.text("👀 正在分析您的五官特征...")
-            user_desc = get_gemini_analysis(img_bytes)
-            progress.progress(30)
-            # st.caption(f"识别到的特征: {user_desc[:50]}...") # 调试用
+            # 获取生成的 Prompt
+            generated_prompt = get_gemini_prompt_v2(img_bytes, bible_character, clothing_style)
             
-            # 第二步：Imagen 图生图生成 (100%)
-            status.text(f"🎨 正在保留您的肖像并邀请 {bible_character} 入镜...")
-            result = generate_with_identity_preservation(img_bytes, bible_character, clothing_style, user_desc)
+            # 调试模式：如果您想看 Gemini 写了什么提示词，可以把下面这行注释取消
+            # st.expander("查看生成的 Prompt").write(generated_prompt)
+            
+            progress.progress(40)
+            
+            # 2. 图像生成
+            status.text(f"🎨 Imagen 4.0 正在渲染高精度合影...")
+            result = generate_image_v4(generated_prompt)
             progress.progress(100)
-            status.text("✨ 完成！")
+            status.text("✨ 生成完毕！")
             
             # 展示
-            st.image(result._image_bytes, caption=f"您与 {bible_character} 的合影", use_column_width=True)
+            st.image(result._image_bytes, caption=f"您与 {bible_character}", use_column_width=True)
             
             # 下载
             st.download_button(
-                label="📥 保存照片", 
+                label="📥 保存原图", 
                 data=result._image_bytes, 
-                file_name=f"with_{bible_character}.png", 
+                file_name=f"imagen4_gen.png", 
                 mime="image/png"
             )
             
-            # 经文
+            # 经文彩蛋
             st.markdown("---")
-            v_model = GenerativeModel("gemini-1.5-flash")
-            verse = v_model.generate_content(f"给我一句关于'{bible_character}'的圣经经文(中英对照)，简短有力。")
+            v_model = GenerativeModel("gemini-1.5-flash") # 经文生成用普通版足够，省钱
+            verse = v_model.generate_content(f"Output one Bible verse about {bible_character} or 'Faith', bilingual (Chinese/English).")
             st.info(verse.text)
             
         except Exception as e:
-            st.error("生成出错")
-            with st.expander("查看技术详情"):
+            st.error("生成流程中断")
+            with st.expander("查看错误详情"):
                 st.code(str(e))
-
-st.markdown("<p class='caption'>Powered by Google Vertex AI (Gemini Flash + Imagen 2 Edit)</p>", unsafe_allow_html=True)
