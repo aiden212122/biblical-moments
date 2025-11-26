@@ -67,8 +67,8 @@ def get_gemini_prompt_v2(user_image_bytes, character, clothing):
     """
     第一步：使用 Gemini 2.5 Flash Preview 进行超精细视觉分析
     """
-    # 🔴 指定模型 ID：gemini-2.5-flash-preview
-    model_id = "gemini-2.5-flash-preview"
+    # 🔴 指定模型 ID：gemini-2.5-flash-preview-09-2025
+    model_id = "gemini-2.5-flash-preview-09-2025"
     
     try:
         model = GenerativeModel(model_id)
@@ -184,4 +184,3 @@ if st.button("✨ 启动生成引擎"):
             st.error("生成流程中断")
             with st.expander("查看错误详情"):
                 st.code(str(e))
-
