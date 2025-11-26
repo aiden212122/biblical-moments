@@ -5,19 +5,16 @@ from google.oauth2 import service_account
 import json
 
 # 1. 页面配置
-st.set_page_config(page_title="Nano Banana Direct", page_icon="🍌", layout="centered")
+st.set_page_config(page_title="Biblical Moments - Stable", page_icon="✝️", layout="centered")
 
-# --- 2. 认证逻辑 (Secrets 读取) ---
+# --- 2. 认证逻辑 (Secrets) ---
 def init_vertex_ai():
     try:
         if "gcp_service_account" in st.secrets:
-            # 读取 Secrets
             raw_json = st.secrets["gcp_service_account"]
-            # 简单容错处理
             try:
                 info = json.loads(raw_json, strict=False)
             except:
-                # 尝试修复换行符
                 info = json.loads(raw_json.replace('\n', '\\n'), strict=False)
             
             creds = service_account.Credentials.from_service_account_info(info)
@@ -34,8 +31,8 @@ if not init_vertex_ai():
     st.stop()
 
 # --- 3. 界面 ---
-st.title("🍌 Nano Banana Direct")
-st.caption("Target Model: gemini-2.5-flash-image")
+st.title("✝️ Biblical Moments")
+st.caption("Engine: Google Imagen 2 (Production Stable)")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -43,51 +40,56 @@ with col1:
 with col2:
     clothing = st.selectbox("服装", ["My original clothes", "Biblical Robes", "Modern Suit"])
 
-uploaded_file = st.file_uploader("直接上传图片 (Feed Image)", type=['jpg', 'png', 'jpeg'])
+uploaded_file = st.file_uploader("上传您的自拍 (直接合成)", type=['jpg', 'png', 'jpeg'])
 
-# --- 4. 核心调用逻辑 ---
-if st.button("🚀 Call Nano Banana API") and uploaded_file:
+# --- 4. 核心逻辑: 使用 Imagen 2 进行编辑 ---
+if st.button("✨ 生成合照") and uploaded_file:
     try:
+        progress = st.progress(0)
         status = st.empty()
-        status.text("正在连接 gemini-2.5-flash-image...")
+        status.text("正在连接 Google Cloud...")
         
-        # 1. 加载模型 (直接指定 Nano Banana ID)
-        model_id = "gemini-2.5-flash-image"
-        model = ImageGenerationModel.from_pretrained(model_id)
+        # 1. 加载模型
+        # imagegeneration@006 是目前唯一支持 edit_images 的稳定版模型 ID
+        model = ImageGenerationModel.from_pretrained("imagegeneration@006")
         
         # 2. 准备图片
         source_img = VertexImage(image_bytes=uploaded_file.getvalue())
         
         # 3. 编写提示词
+        # 这里的技巧是：告诉模型“背景变了，身边多了个人，但原来的主体保持不变”
         prompt = f"""
-        Edit this image.
-        Task: Place the person in the image standing next to {bible_character}.
-        Setting: Realistic biblical era background.
-        Clothing: The person wears {clothing}.
-        Style: Photorealistic, 8k.
-        Keep the person's face identical to the input image.
+        A photorealistic shot of the person in the input image standing side-by-side with {bible_character} from the Bible.
+        Background: A realistic biblical landscape (Desert or Ancient City).
+        Lighting: Cinematic, soft, warm sunlight.
+        Quality: 8k, highly detailed.
+        User's clothing: {clothing}.
+        {bible_character} is wearing historically accurate robes.
         """
         
-        # 4. 直接调用 edit_images
-        # 这是"图生图"的标准接口
-        status.text("正在生成 (Image-to-Image)...")
-        response = model.edit_images(
+        status.text("正在进行图像融合 (Image-to-Image)...")
+        
+        # 4. 调用 edit_images
+        # base_image 参数就是您的“喂图”
+        images = model.edit_images(
             prompt=prompt,
-            base_image=source_img,  # <--- 核心：直接喂图
+            base_image=source_img,
             number_of_images=1,
-            guidance_scale=60,      # 较高的引导值
+            guidance_scale=60, # 较高的引导值，强制模型听从Prompt修改背景
             language="en"
         )
         
+        progress.progress(100)
+        status.success("生成成功！")
+        
         # 5. 展示结果
-        result = response[0]
-        st.image(result._image_bytes, caption="Nano Banana Output", use_column_width=True)
+        result = images[0]
+        st.image(result._image_bytes, caption=f"With {bible_character}", use_column_width=True)
         
         # 下载
-        st.download_button("📥 下载图片", result._image_bytes, "nano_output.png", "image/png")
-        status.success("调用成功！")
+        st.download_button("📥 保存图片", result._image_bytes, "bible_photo.png", "image/png")
 
     except Exception as e:
-        st.error("API 调用失败")
-        st.error(f"错误详情: {str(e)}")
-        st.info("提示：如果报 '404 Not Found'，说明您的 Google Cloud 项目尚未获得该预览版模型的白名单权限。")
+        st.error("生成失败")
+        st.error(f"错误信息: {str(e)}")
+        st.info("提示：请确保您的 Google Cloud 项目已启用 Vertex AI API。")
